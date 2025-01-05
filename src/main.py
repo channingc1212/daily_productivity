@@ -10,6 +10,7 @@ from agents.manager import ManagerAgent
 from agents.intent_detector import IntentDetectorAgent
 from agents.email_agent import EmailAgent
 from agents.calendar_agent import CalendarAgent
+from utils.logging import setup_logging
 
 app = typer.Typer()
 console = Console()
@@ -39,21 +40,42 @@ async def setup_agents():
         logger.error(f"Error setting up agents: {str(e)}")
         raise
 
-@app.command()
-def chat(ctx: typer.Context):
-    """Start an interactive chat session with the assistant"""
-    console.print(Panel.fit("Personal Assistant - Type 'exit' to quit"))
+def main():
+    """Main entry point for the application"""
+    # Setup logging
+    setup_logging()
+    logger.info("Starting personal assistant...")
+    
+    welcome_message = """Welcome to Personal Assistant!
+
+Commands:
+- Type your request in natural language
+- Type 'exit' or 'quit' to close the application
+
+Examples:
+- "Show me my recent emails"
+- "Send an email to someone@example.com"
+- "Show my calendar for next week"
+- "Schedule a meeting tomorrow at 2pm"
+"""
+    
+    console.print(Panel.fit(welcome_message))
     
     async def chat_loop():
         manager = await setup_agents()
+        logger.info("All agents initialized successfully")
         
         while True:
             user_input = typer.prompt("You")
             
-            if user_input.lower() == "exit":
+            if user_input.lower() in ["exit", "quit"]:
+                logger.info("User requested to exit")
+                console.print("[green]Goodbye! Have a great day! 👋[/green]")
                 break
             
             try:
+                logger.debug(f"Processing user input: {user_input}")
+                
                 # First, detect intent
                 intent_response = await manager.process({
                     "agent": "intent_detector",
@@ -61,6 +83,7 @@ def chat(ctx: typer.Context):
                 })
                 
                 if not intent_response.success:
+                    logger.error(f"Intent detection failed: {intent_response.message}")
                     console.print(f"[red]Error:[/red] {intent_response.message}")
                     continue
                 
@@ -70,8 +93,11 @@ def chat(ctx: typer.Context):
                     agent_name = intent_data["agent"]
                     
                     if agent_name not in ["email", "calendar"]:
+                        logger.error(f"Unknown agent requested: {agent_name}")
                         console.print(f"[red]Error:[/red] Unknown agent: {agent_name}")
                         continue
+                    
+                    logger.info(f"Routing request to {agent_name} agent")
                     
                     # Process with appropriate agent
                     agent_response = await manager.process({
@@ -81,24 +107,31 @@ def chat(ctx: typer.Context):
                     })
                     
                     if agent_response.success:
+                        logger.info(f"Request processed successfully by {agent_name} agent")
                         console.print(f"[green]Success:[/green] {agent_response.message}")
                         if agent_response.data:
                             console.print(agent_response.data)
                     else:
+                        logger.error(f"Agent processing failed: {agent_response.message}")
                         console.print(f"[red]Error:[/red] {agent_response.message}")
                     
                 except json.JSONDecodeError:
+                    logger.error("Failed to parse intent response JSON")
                     console.print("[red]Error:[/red] Failed to parse intent response")
                 except KeyError as e:
+                    logger.error(f"Missing required field in intent: {str(e)}")
                     console.print(f"[red]Error:[/red] Missing required field in intent: {str(e)}")
                 
             except Exception as e:
+                logger.exception("Unexpected error occurred")
                 console.print(f"[red]Error:[/red] {str(e)}")
     
     try:
         asyncio.run(chat_loop())
     except KeyboardInterrupt:
-        console.print("\nGoodbye! 👋")
+        logger.info("Application terminated by user")
+        console.print("\n[yellow]Please use 'exit' or 'quit' to close the application next time.[/yellow]")
+        console.print("[green]Goodbye! 👋[/green]")
 
 if __name__ == "__main__":
-    app() 
+    main() 

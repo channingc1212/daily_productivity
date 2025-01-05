@@ -1,7 +1,7 @@
 from typing import Dict, Any
 from .base import BaseAgent, AgentResponse
-from langchain.chat_models import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
 from loguru import logger
 
 INTENT_PROMPT = """You are an intent detection agent for a personal assistant.
@@ -35,37 +35,18 @@ Available agents and their capabilities:
 
 User input: {user_input}
 
-Respond in the following JSON format:
-{
-    "agent": "email" or "calendar",
-    "action": "action_name",
-    "parameters": {
-        // extracted parameters based on the action
-    }
-}
+Respond with a valid JSON object containing:
+- agent: either "email" or "calendar"
+- action: the specific action to perform
+- parameters: a dictionary of parameters for the action
 
-Examples:
-1. "Show me my recent emails"
-{
-    "agent": "email",
-    "action": "summarize_inbox",
-    "parameters": {
-        "max_emails": 5
-    }
-}
+Example responses:
 
-2. "Schedule a meeting with john@example.com tomorrow at 2pm for 1 hour"
-{
-    "agent": "calendar",
-    "action": "create_event",
-    "parameters": {
-        "summary": "Meeting",
-        "start_time": "2024-01-06T14:00:00Z",
-        "end_time": "2024-01-06T15:00:00Z",
-        "attendees": ["john@example.com"]
-    }
-}
-"""
+For "Show me my recent emails":
+{{"agent": "email", "action": "summarize_inbox", "parameters": {{"max_emails": 5}}}}
+
+For "Schedule a meeting with john@example.com tomorrow at 2pm for 1 hour":
+{{"agent": "calendar", "action": "create_event", "parameters": {{"summary": "Meeting", "start_time": "2024-01-06T14:00:00Z", "end_time": "2024-01-06T15:00:00Z", "attendees": ["john@example.com"]}}}}"""
 
 class IntentDetectorAgent(BaseAgent):
     """Agent responsible for detecting user intent and routing to appropriate agent"""

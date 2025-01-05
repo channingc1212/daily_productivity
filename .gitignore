@@ -6,6 +6,10 @@ ENV/
 # Environment variables
 .env
 
+# Google OAuth client configuration
+client_secret*.json
+credentials*.json
+
 # Python cache files
 __pycache__/
 *.py[cod]
