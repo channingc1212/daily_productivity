@@ -1,0 +1,8 @@
+# Development Protocol
+- Use LLM to solve problems, build agents, please do not use any hard-coded approach to replace LLM
+- Please use model-agnostic approach to build the solution, so that I can easily switch to other models in the future
+- Always check the code when making changes to make sure previous code and functions are not affected
+- Always explain in details on why you make certain changes on the code
+- Make the orchestration of agents as simple as possible, do not over-engineer the solution
+- Make the orchestration of agents as scalable as possible, as I need to enhance the solution to support more agents in the future
+- Please always visualize the workflow of the solution, and explain the workflow in details when new changes are made
