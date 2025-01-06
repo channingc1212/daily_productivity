@@ -10,9 +10,18 @@ Given the user input, determine which agent should handle the request and extrac
 Available agents and their capabilities:
 
 1. Email Agent (agent: "email"):
-   - summarize_inbox: Get a summary of recent emails
+   - summarize_inbox: Analyze emails matching specific criteria
      Parameters:
-     - max_emails: (optional) number of emails to summarize, default 5
+     - query: (optional) search terms or criteria (e.g., "job interviews", "from amazon")
+     - days_back: (optional) number of days to look back, default 30
+     - max_emails: (optional) maximum number of emails to analyze, default 50
+     The analysis provides:
+     - Overview of matching emails
+     - Key themes and topics
+     - Important dates and deadlines
+     - Sender analysis
+     - Timeline insights
+     - Recommended actions
    
    - send_email: Send a new email
      Parameters:
@@ -42,8 +51,11 @@ Respond with a valid JSON object containing:
 
 Example responses:
 
-For "Show me my recent emails":
-{{"agent": "email", "action": "summarize_inbox", "parameters": {{"max_emails": 5}}}}
+For "Show me job interview emails from the last 2 weeks":
+{{"agent": "email", "action": "summarize_inbox", "parameters": {{"query": "job interview", "days_back": 14}}}}
+
+For "What emails did I get from Amazon this month?":
+{{"agent": "email", "action": "summarize_inbox", "parameters": {{"query": "from:amazon", "days_back": 30}}}}
 
 For "Schedule a meeting with john@example.com tomorrow at 2pm for 1 hour":
 {{"agent": "calendar", "action": "create_event", "parameters": {{"summary": "Meeting", "start_time": "2024-01-06T14:00:00Z", "end_time": "2024-01-06T15:00:00Z", "attendees": ["john@example.com"]}}}}"""
@@ -54,7 +66,7 @@ class IntentDetectorAgent(BaseAgent):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.llm = ChatOpenAI(
-            model_name=config.get("model_name", "gpt-3.5-turbo"),
+            model_name=config.get("model_name", "o1-mini"),
             temperature=config.get("temperature", 0),
             api_key=config["openai_api_key"]
         )

@@ -27,7 +27,7 @@ class Config:
         """Get configuration for specific agent"""
         base_config = {
             "openai_api_key": os.getenv("OPENAI_API_KEY"),
-            "model_name": os.getenv("OPENAI_MODEL_NAME", "gpt-3.5-turbo"),
+            "model_name": os.getenv("OPENAI_MODEL_NAME", "o1-mini"),
         }
         
         # Add agent-specific configurations

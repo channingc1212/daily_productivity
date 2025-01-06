@@ -7,6 +7,8 @@ class ManagerAgent(BaseAgent):
     """Manager agent that orchestrates all other agents"""
     
     def __init__(self, config: Dict[str, Any]):
+        # Set default model to gpt-4-mini if not specified
+        config['model'] = config.get('model', 'gpt-4-mini')
         super().__init__(config)
         self.agents: Dict[str, BaseAgent] = {}
         
