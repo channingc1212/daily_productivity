@@ -80,6 +80,30 @@ Use the same detailed JSON format as the individual analyses, but ensure the mer
 
 The merged analysis should be more insightful than the sum of individual analyses."""
 
+# Add new prompt for email drafting
+EMAIL_DRAFT_PROMPT = """You are a professional email composer. Draft an email based on the following requirements:
+
+Purpose: {purpose}
+To: {recipient}
+Additional Context: {context}
+
+Guidelines for composition:
+- Write in a professional yet friendly tone
+- Be concise and clear
+- Use appropriate greeting and closing
+- Maintain proper email etiquette
+- Highlight key points or requests clearly
+
+Respond in JSON format:
+{{
+    "draft": {{
+        "subject": "proposed email subject",
+        "body": "complete email body with greeting and signature",
+        "tone": "brief description of the tone used",
+        "key_points": ["main points covered in the email"]
+    }}
+}}"""
+
 class EmailAgent(BaseAgent):
     """Agent responsible for handling email operations using Gmail API"""
     
@@ -93,6 +117,8 @@ class EmailAgent(BaseAgent):
         )
         self.batch_analysis_prompt = ChatPromptTemplate.from_template(EMAIL_BATCH_ANALYSIS_PROMPT)
         self.merge_prompt = ChatPromptTemplate.from_template(MERGE_ANALYSES_PROMPT)
+        self._drafts = {}
+        self._latest_draft_id = None
         self._authenticate()
 
     def _chunk_emails(self, emails: List[Dict[str, str]], max_chars: int = MAX_CONTENT_LENGTH) -> List[List[Dict[str, str]]]:
@@ -334,12 +360,22 @@ class EmailAgent(BaseAgent):
             )
         
         try:
-            message = MIMEText(body)
-            message['to'] = to
-            message['subject'] = subject
+            # Create message container with proper email formatting
+            message = MIMEText(body, 'plain', 'utf-8')
+            sender = self.service.users().getProfile(userId='me').execute()['emailAddress']
             
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            # Format headers according to RFC 2822
+            message['From'] = sender
+            message['To'] = to.strip()  # Ensure no whitespace
+            message['Subject'] = subject
             
+            # Convert the message to a string first
+            raw_message = message.as_string()
+            
+            # Then encode it
+            raw = base64.urlsafe_b64encode(raw_message.encode('utf-8')).decode('utf-8')
+            
+            # Send the email
             self.service.users().messages().send(
                 userId='me',
                 body={'raw': raw}
@@ -347,7 +383,7 @@ class EmailAgent(BaseAgent):
             
             return AgentResponse(
                 success=True,
-                message="Email sent successfully",
+                message=f"Email sent successfully to {to}",
                 data=None
             )
             
@@ -359,6 +395,29 @@ class EmailAgent(BaseAgent):
                 data=None
             )
 
+    async def _send_latest_draft(self) -> AgentResponse:
+        """Send the most recently created draft"""
+        if not self._latest_draft_id or self._latest_draft_id not in self._drafts:
+            return AgentResponse(
+                success=False,
+                message="No recent draft found to send. Please create a new draft first.",
+                data=None
+            )
+        
+        draft = self._drafts[self._latest_draft_id]
+        result = await self._send_email(
+            to=draft["to"],
+            subject=draft["subject"],
+            body=draft["body"]
+        )
+        
+        if result.success:
+            # Remove the draft after successful sending
+            del self._drafts[self._latest_draft_id]
+            self._latest_draft_id = None
+        
+        return result
+
     def validate_input(self, input_data: Dict[str, Any]) -> bool:
         """Validate the input data"""
         return (
@@ -366,6 +425,46 @@ class EmailAgent(BaseAgent):
             "action" in input_data and
             isinstance(input_data.get("parameters", {}), dict)
         ) 
+
+    async def _draft_email(self, to: str, purpose: str, context: str = "") -> AgentResponse:
+        """Draft an email using LLM for review"""
+        try:
+            chain = ChatPromptTemplate.from_template(EMAIL_DRAFT_PROMPT) | self.llm
+            result = await chain.ainvoke({
+                "purpose": purpose,
+                "recipient": to,
+                "context": context
+            })
+            
+            draft = json.loads(result.content)
+            draft_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Save draft in memory
+            self._drafts[draft_id] = {
+                "to": to,
+                "subject": draft["draft"]["subject"],
+                "body": draft["draft"]["body"],
+                "created_at": datetime.now().isoformat()
+            }
+            self._latest_draft_id = draft_id
+            
+            return AgentResponse(
+                success=True,
+                message="Email draft created for review",
+                data={
+                    "draft": draft["draft"],
+                    "to": to,
+                    "requires_review": True,
+                    "instructions": "To send this email, simply confirm by saying 'yes', 'send it', or 'looks good'"
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error drafting email: {str(e)}")
+            return AgentResponse(
+                success=False,
+                message=f"Error drafting email: {str(e)}",
+                data=None
+            )
 
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """Process email-related requests"""
@@ -386,7 +485,21 @@ class EmailAgent(BaseAgent):
                     days_back=params.get("days_back", 30),
                     max_emails=params.get("max_emails", DEFAULT_MAX_EMAILS)
                 )
+            elif action == "draft_email":
+                return await self._draft_email(
+                    to=params.get("to"),
+                    purpose=params.get("purpose", ""),
+                    context=params.get("context", "")
+                )
+            elif action == "confirm_send":
+                return await self._send_latest_draft()
             elif action == "send_email":
+                if not params.get("reviewed", False):
+                    return AgentResponse(
+                        success=False,
+                        message="Email must be reviewed before sending",
+                        data=None
+                    )
                 return await self._send_email(
                     to=params.get("to"),
                     subject=params.get("subject"),

@@ -89,7 +89,19 @@ Examples:
                 
                 # Parse the intent response
                 try:
-                    intent_data = json.loads(intent_response.data["raw_response"])
+                    raw_response = intent_response.data["raw_response"].strip()
+                    logger.debug(f"Raw intent response: {raw_response}")
+                    
+                    # Remove any markdown code block formatting if present
+                    if raw_response.startswith("```"):
+                        raw_response = raw_response.split("```")[1]
+                        if raw_response.startswith("json"):
+                            raw_response = raw_response[4:]
+                    raw_response = raw_response.strip()
+                    
+                    logger.debug(f"Cleaned intent response: {raw_response}")
+                    
+                    intent_data = json.loads(raw_response)
                     agent_name = intent_data["agent"]
                     
                     if agent_name not in ["email", "calendar"]:
@@ -98,6 +110,7 @@ Examples:
                         continue
                     
                     logger.info(f"Routing request to {agent_name} agent")
+                    logger.debug(f"Intent data: {intent_data}")
                     
                     # Process with appropriate agent
                     agent_response = await manager.process({
@@ -115,16 +128,20 @@ Examples:
                         logger.error(f"Agent processing failed: {agent_response.message}")
                         console.print(f"[red]Error:[/red] {agent_response.message}")
                     
-                except json.JSONDecodeError:
-                    logger.error("Failed to parse intent response JSON")
-                    console.print("[red]Error:[/red] Failed to parse intent response")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse intent response JSON: {str(e)}")
+                    logger.error(f"Raw response was: {intent_response.data['raw_response']}")
+                    console.print("[red]Error:[/red] Failed to understand the request. Please try rephrasing.")
                 except KeyError as e:
-                    logger.error(f"Missing required field in intent: {str(e)}")
-                    console.print(f"[red]Error:[/red] Missing required field in intent: {str(e)}")
+                    logger.error(f"Missing key in intent response: {str(e)}")
+                    console.print("[red]Error:[/red] Invalid intent response format. Please try again.")
+                except Exception as e:
+                    logger.error(f"Error processing intent: {str(e)}")
+                    console.print("[red]Error:[/red] An unexpected error occurred. Please try again.")
                 
             except Exception as e:
-                logger.exception("Unexpected error occurred")
-                console.print(f"[red]Error:[/red] {str(e)}")
+                logger.error(f"Error in chat loop: {str(e)}")
+                console.print(f"[red]Error:[/red] An unexpected error occurred. Please try again.")
     
     try:
         asyncio.run(chat_loop())
