@@ -55,3 +55,15 @@ This project is under active development. Next steps:
 2. Implement Calendar Agent
 3. Add authentication flow for Google APIs
 4. Enhance intent detection capabilities
+
+## Project WorkFlow
+```mermaid
+graph TD
+    A[User Input] --> B[Intent Detector]
+    B --> C{Route to Agent}
+    C -->|Calendar| D[Calendar Agent]
+    C -->|Email| E[Email Agent]
+    D --> F[Response]
+    E --> F
+    F --> A
+```
