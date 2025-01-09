@@ -84,3 +84,18 @@ sequenceDiagram
     Main->>CalendarAgent: Create CalendarAgent
     Main->>Manager: Register CalendarAgent
 ```
+##
+```mermaid
+sequenceDiagram
+    participant User
+    participant Manager
+    participant IntentDetector
+    participant TargetAgent
+    
+    User->>Manager: User Input
+    Manager->>IntentDetector: Detect Intent
+    IntentDetector-->>Manager: Intent Response
+    Manager->>TargetAgent: Process Request
+    TargetAgent-->>Manager: Agent Response
+    Manager-->>User: Final Response
+```
