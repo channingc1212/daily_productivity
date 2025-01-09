@@ -5,92 +5,100 @@ from langchain_core.prompts import ChatPromptTemplate
 from loguru import logger
 import json
 
-INTENT_PROMPT = """You are an intent detection agent for a personal assistant.
-Given the user input, determine which agent should handle the request and extract relevant information.
+INTENT_PROMPT = """You are an intent detection system for a personal assistant. Based on the user's input and current conversation state, determine the appropriate agent and action to handle the request.
 
-Available agents and their capabilities:
-
-1. Email Agent (agent: "email"):
-   - summarize_inbox: Analyze emails matching specific criteria
-     Parameters:
-     - query: (optional) search terms or criteria (e.g., "job interviews", "from amazon")
-     - days_back: (optional) number of days to look back, default 30
-     - max_emails: (optional) maximum number of emails to analyze, default 10
-     The analysis provides:
-     - Overview of matching emails
-     - Key actions needed
-     - Important dates
-   
-   - draft_email: Create an email draft for review
-     Parameters:
-     - to: recipient email address
-     - purpose: the purpose or intent of the email
-     - context: (optional) additional context or specific points to include
-   
-   - confirm_send: Send the most recently created draft
-     This action should be detected when:
-     - User expresses approval or confirmation of the draft
-     - User indicates they want to proceed with sending
-     - User shows satisfaction with the draft content
-     Parameters: none (uses the latest draft)
-   
-   - send_email: Send a reviewed email
-     Parameters:
-     - to: recipient email address
-     - subject: email subject
-     - body: email content
-     - reviewed: must be true to send
-
-2. Calendar Agent (agent: "calendar"):
-   - list_events: List upcoming calendar events
-     Parameters:
-     - days: (optional) number of days to look ahead, default 7
-   
-   - create_event: Create or modify a calendar event
-     Parameters:
-     - summary: event title
-     - start_time: start time (e.g., "Thursday 4pm this week")
-     - end_time: (optional) end time
-     - description: (optional) event description
-     - attendees: (optional) list of attendee email addresses
-     - duration_minutes: (optional) event duration in minutes, default 30
-     - is_modification: (boolean) whether this is modifying an existing draft
-     - modifications: (optional) specific changes to make to the current draft
-     - confirmed: (boolean) whether to create the event or just show draft
+Current conversation state: {conversation_state}
 
 User input: {user_input}
 
-Consider the context:
-1. For initial event creation requests (e.g., "schedule a meeting", "create an event"), ALWAYS set confirmed=false
-   to show the draft first.
-2. If a calendar event draft was just shown and the user wants to modify it (e.g., change duration, time, description),
-   treat it as a modification to the existing draft rather than creating a new event.
-3. If the user expresses confirmation or approval in ANY way (e.g., "looks good", "confirmed", "yes", "that's correct", 
-   "perfect", "go ahead", "create it", "schedule it", etc.), set confirmed=true in the parameters.
-4. If the user wants to modify something, identify what they want to change and include it in the modifications parameter.
-5. For calendar events, always interpret day references (e.g., "Thursday") relative to the current week unless explicitly 
-   stated otherwise.
-6. For duration modifications:
-   - When user says "extend to X minutes/hours", set the absolute duration
-   - When user says "extend by X minutes/hours", use relative duration with "+="
-   - Examples:
-     - "extend to 1 hour" -> duration_minutes: 60
-     - "extend by 30 minutes" -> duration_minutes: "+=30"
-     - "make it an hour longer" -> duration_minutes: "+=60"
+Detect the intent and return a JSON response with the following structure:
+{{
+    "agent": "email|calendar",
+    "action": "specific_action",
+    "parameters": {{
+        // For calendar events:
+        "summary": "event title",
+        "start_time": "YYYY-MM-DD HH:mm",  // Format time in 24-hour format with date
+        "duration_minutes": 30,  // Default duration
+        "description": "optional description",
+        "attendees": [],  // Optional list of attendees
+        // For modifications:
+        "modification": {{
+            "type": "duration|time|description",
+            "value": "the new value"
+        }}
+    }},
+    "requires_confirmation": true|false,
+    "context": {{
+        "is_modification": true|false,
+        "modification_type": "duration|time|description|etc",
+        "original_draft_preserved": true|false
+    }}
+}}
 
-Example responses:
+For calendar events:
+- Extract time expressions from natural language:
+  * Absolute times: "11am" -> "HH:mm"
+  * Relative dates: "tomorrow", "next week", "this Friday"
+  * Combined expressions: "tomorrow at 11am" -> "YYYY-MM-DD 11:00"
+  * Time ranges: "from 2pm to 4pm", "for 2 hours"
+- Always include the full date and time in start_time
+- Default duration is 30 minutes unless specified
 
-For initial event creation:
-{{"agent": "calendar", "action": "create_event", "parameters": {{"summary": "New Event", "start_time": "Thursday 4pm this week", "duration_minutes": 30, "confirmed": false}}}}
+For confirmations:
+- When user expresses agreement (e.g., "looks good", "yes", "that works", "confirmed", "okay", "sure", "perfect", "great"):
+  * Set action to "confirm_draft"
+  * No need for modification parameters
+  * Set requires_confirmation to false
 
-For modifying duration (absolute):
-{{"agent": "calendar", "action": "create_event", "parameters": {{"is_modification": true, "modifications": {{"duration_minutes": 60}}}}}}
+Examples:
+1. "create an event tomorrow 11am for shopping" ->
+{{
+    "agent": "calendar",
+    "action": "create_event",
+    "parameters": {{
+        "summary": "Shopping",
+        "start_time": "2025-01-09 11:00",
+        "duration_minutes": 30,
+        "description": "Shopping event"
+    }},
+    "requires_confirmation": true,
+    "context": {{
+        "is_modification": false,
+        "original_draft_preserved": false
+    }}
+}}
 
-For modifying duration (relative):
-{{"agent": "calendar", "action": "create_event", "parameters": {{"is_modification": true, "modifications": {{"duration_minutes": "+=30"}}}}}}
+2. "extend to 1 hour" ->
+{{
+    "agent": "calendar",
+    "action": "modify_draft",
+    "parameters": {{
+        "modification": {{
+            "type": "duration",
+            "value": "60"
+        }}
+    }},
+    "requires_confirmation": true,
+    "context": {{
+        "is_modification": true,
+        "modification_type": "duration",
+        "original_draft_preserved": true
+    }}
+}}
 
-For confirming a draft:
-{{"agent": "calendar", "action": "create_event", "parameters": {{"confirmed": true}}}}"""
+3. "looks good" ->
+{{
+    "agent": "calendar",
+    "action": "confirm_draft",
+    "parameters": {{}},
+    "requires_confirmation": false,
+    "context": {{
+        "is_modification": false,
+        "original_draft_preserved": true
+    }}
+}}
+"""
 
 class IntentDetectorAgent(BaseAgent):
     """Agent responsible for detecting user intent and routing to appropriate agent"""
@@ -103,7 +111,84 @@ class IntentDetectorAgent(BaseAgent):
             api_key=config["openai_api_key"]
         )
         self.prompt = ChatPromptTemplate.from_template(INTENT_PROMPT)
-        self._last_draft = None  # Store the last draft event details
+        self.conversation_history = []
+        self._current_state = {
+            "current_draft": None,
+            "last_action": None,
+            "pending_confirmation": False
+        }
+    
+    def _update_state(self, intent_response: Dict[str, Any]) -> None:
+        """Update the conversation state based on the detected intent"""
+        try:
+            self._current_state["last_action"] = {
+                "agent": intent_response.get("agent"),
+                "action": intent_response.get("action"),
+                "context": intent_response.get("context", {})
+            }
+            self._current_state["pending_confirmation"] = intent_response.get("requires_confirmation", False)
+        except Exception as e:
+            logger.error(f"Error updating state: {str(e)}")
+    
+    def _get_conversation_state(self) -> str:
+        """Generate a description of the current conversation state"""
+        try:
+            if not self._current_state.get("last_action"):
+                return "No previous context. Starting fresh."
+            
+            state_desc = []
+            if self._current_state.get("current_draft"):
+                state_desc.append("There is a draft waiting for confirmation or modification.")
+            
+            if self._current_state.get("last_action"):
+                action = self._current_state["last_action"]
+                state_desc.append(f"Last action: {action.get('agent')} agent performed {action.get('action')}")
+            
+            if self._current_state.get("pending_confirmation"):
+                state_desc.append("Waiting for user confirmation.")
+            
+            return " ".join(state_desc) if state_desc else "No active context."
+        except Exception as e:
+            logger.error(f"Error getting conversation state: {str(e)}")
+            return "Error retrieving conversation state."
+    
+    def _clean_llm_response(self, response_text: str) -> str:
+        """Clean and validate LLM response text"""
+        try:
+            # Remove any markdown formatting
+            cleaned = response_text.strip()
+            if cleaned.startswith("```"):
+                parts = cleaned.split("```")
+                if len(parts) >= 2:
+                    cleaned = parts[1]
+                    if cleaned.startswith("json"):
+                        cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+            
+            # Parse JSON to validate structure
+            intent_data = json.loads(cleaned)
+            
+            # Validate time format for calendar events
+            if (
+                intent_data.get("agent") == "calendar" and
+                intent_data.get("action") == "create_event" and
+                "parameters" in intent_data
+            ):
+                params = intent_data["parameters"]
+                if "start_time" in params:
+                    # Ensure time is in YYYY-MM-DD HH:mm format
+                    start_time = params["start_time"]
+                    try:
+                        from datetime import datetime
+                        datetime.strptime(start_time, "%Y-%m-%d %H:%M")
+                    except ValueError:
+                        logger.error(f"Invalid time format: {start_time}")
+                        raise ValueError("Time must be in YYYY-MM-DD HH:mm format")
+            
+            return cleaned
+        except Exception as e:
+            logger.error(f"Error cleaning LLM response: {str(e)}")
+            raise
     
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """Process user input and detect intent"""
@@ -115,68 +200,58 @@ class IntentDetectorAgent(BaseAgent):
             )
         
         try:
-            # Check if this is a confirmation for a draft event
-            user_input = input_data["user_input"].lower().strip()
-            confirmation_phrases = [
-                "looks good", "confirmed", "yes", "that's correct", "perfect",
-                "go ahead", "create it", "schedule it", "that works", "proceed",
-                "ok", "good", "fine", "alright", "sure"
-            ]
+            # Get current conversation state
+            conversation_state = self._get_conversation_state()
             
-            # If we have a draft and user input matches confirmation phrases
-            if any(phrase in user_input for phrase in confirmation_phrases):
-                return AgentResponse(
-                    success=True,
-                    message="Intent detected successfully",
-                    data={
-                        "raw_response": json.dumps({
-                            "agent": "calendar",
-                            "action": "create_event",
-                            "parameters": {
-                                "confirmed": True
-                            }
-                        })
-                    }
-                )
-            
-            # Use LLM for all other intent detection
+            # Use LLM for intent detection with full context
             chain = self.prompt | self.llm
-            result = await chain.ainvoke({"user_input": input_data["user_input"]})
+            result = await chain.ainvoke({
+                "user_input": input_data["user_input"],
+                "conversation_state": conversation_state
+            })
             
-            # Clean up the response
-            response_text = result.content.strip()
-            logger.debug(f"Raw LLM response: {response_text}")
-            
-            # Remove any markdown code block formatting if present
-            if response_text.startswith("```"):
-                response_text = response_text.split("```")[1]
-                if response_text.startswith("json"):
-                    response_text = response_text[4:]
-            response_text = response_text.strip()
-            
-            logger.debug(f"Cleaned LLM response: {response_text}")
-            
-            # Validate the response format
+            # Clean and validate the response
             try:
-                parsed = json.loads(response_text)
-                required_fields = ["agent", "action", "parameters"]
-                for field in required_fields:
-                    if field not in parsed:
-                        raise KeyError(f"Missing required field: {field}")
+                response_text = self._clean_llm_response(result.content)
+                intent_response = json.loads(response_text)
                 
-                # Return the cleaned response
+                # Validate required fields
+                required_fields = ["agent", "action", "parameters", "context"]
+                if not all(field in intent_response for field in required_fields):
+                    raise ValueError("Missing required fields in intent response")
+                
+                # Special handling for modifications
+                if intent_response.get("context", {}).get("is_modification"):
+                    if not intent_response.get("parameters", {}).get("modification"):
+                        raise ValueError("Missing modification details in parameters")
+                    
+                    # Ensure modification has type and value
+                    mod = intent_response["parameters"]["modification"]
+                    if not all(k in mod for k in ["type", "value"]):
+                        raise ValueError("Modification must specify type and value")
+                
+                # Update conversation state
+                self._update_state(intent_response)
+                
+                # Store the raw response for the agent
                 return AgentResponse(
                     success=True,
                     message="Intent detected successfully",
                     data={"raw_response": response_text}
                 )
                 
-            except (json.JSONDecodeError, KeyError) as e:
-                logger.error(f"Invalid LLM response format: {str(e)}")
-                logger.error(f"Response was: {response_text}")
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON format in LLM response: {str(e)}")
                 return AgentResponse(
                     success=False,
                     message="Failed to parse intent. Please try rephrasing your request.",
+                    data=None
+                )
+            except ValueError as e:
+                logger.error(f"Invalid intent response format: {str(e)}")
+                return AgentResponse(
+                    success=False,
+                    message="Invalid intent format. Please try rephrasing your request.",
                     data=None
                 )
             
@@ -184,10 +259,19 @@ class IntentDetectorAgent(BaseAgent):
             logger.error(f"Error detecting intent: {str(e)}")
             return AgentResponse(
                 success=False,
-                message=f"Error detecting intent: {str(e)}",
+                message="Sorry, I encountered an error. Please try again.",
                 data=None
             )
     
     def validate_input(self, input_data: Dict[str, Any]) -> bool:
         """Validate the input data"""
-        return isinstance(input_data, dict) and "user_input" in input_data 
+        try:
+            return (
+                isinstance(input_data, dict) and
+                "user_input" in input_data and
+                isinstance(input_data["user_input"], str) and
+                len(input_data["user_input"].strip()) > 0
+            )
+        except Exception as e:
+            logger.error(f"Error validating input: {str(e)}")
+            return False 

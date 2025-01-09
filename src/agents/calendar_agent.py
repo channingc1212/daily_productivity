@@ -72,6 +72,93 @@ Example response format:
 
 Return only the JSON object, no other text or formatting."""
 
+EVENT_ANALYSIS_PROMPT = """You are a calendar assistant analyzing event details and providing suggestions.
+Current event details:
+{event_details}
+
+Previous events in context:
+{context_events}
+
+Analyze the event and provide:
+1. Potential conflicts or overlaps
+2. Suggested modifications (duration, time, etc.)
+3. Related events or patterns
+4. Smart defaults (based on user patterns)
+5. Scheduling optimization suggestions
+
+Return ONLY a JSON object in the following format:
+{{
+    "analysis": {{
+        "conflicts": [
+            {{
+                "type": "overlap",
+                "with_event": "event name",
+                "time": "event time"
+            }}
+        ],
+        "suggestions": [
+            {{
+                "type": "duration",
+                "suggestion": "Consider extending to 1 hour",
+                "reason": "Most similar events are 1 hour long"
+            }}
+        ],
+        "related_events": [
+            {{
+                "name": "event name",
+                "relationship": "similar time/day"
+            }}
+        ],
+        "patterns": [
+            {{
+                "type": "timing",
+                "pattern": "Usually schedule shopping in the afternoon"
+            }}
+        ],
+        "optimizations": [
+            {{
+                "type": "schedule",
+                "suggestion": "Better time slot available at 2 PM"
+            }}
+        ]
+    }}
+}}"""
+
+MODIFICATION_PROMPT = """You are a calendar assistant handling event modifications.
+Current event draft:
+{current_draft}
+
+User's modification request:
+{modification_request}
+
+Previous modifications:
+{modification_history}
+
+Analyze the request and determine:
+1. What specific aspects need to be modified
+2. Whether the modification is relative or absolute
+3. Any implied changes that should be made
+4. Any clarifications needed from the user
+
+For duration changes:
+- "extend to X hour/minutes" -> absolute duration (e.g., "duration_minutes": 60)
+- "extend by X hour/minutes" -> relative duration (e.g., "duration_minutes": "+=30")
+- "make it X hour/minutes longer" -> relative duration (e.g., "duration_minutes": "+=60")
+- "change to X hour/minutes" -> absolute duration (e.g., "duration_minutes": 45)
+- "set duration to X" -> absolute duration (e.g., "duration_minutes": 90)
+
+Return ONLY a JSON object in the following format:
+{{
+    "modifications": {{
+        "explicit": {{
+            "duration_minutes": 60
+        }},
+        "implicit": {{}},
+        "requires_clarification": false,
+        "clarification_question": null
+    }}
+}}"""
+
 class CalendarAgent(BaseAgent):
     """Agent responsible for handling calendar operations using Google Calendar API"""
     
@@ -87,7 +174,11 @@ class CalendarAgent(BaseAgent):
         )
         self.summary_prompt = ChatPromptTemplate.from_template(CALENDAR_SUMMARY_PROMPT)
         self.date_prompt = ChatPromptTemplate.from_template(DATE_PARSING_PROMPT)
+        self.event_analysis_prompt = ChatPromptTemplate.from_template(EVENT_ANALYSIS_PROMPT)
+        self.modification_prompt = ChatPromptTemplate.from_template(MODIFICATION_PROMPT)
         self._current_draft = None  # Store the current draft event
+        self._draft_id = 0  # Initialize draft ID counter
+        self._modification_history = []
         self._authenticate()
     
     def _authenticate(self):
@@ -414,180 +505,269 @@ class CalendarAgent(BaseAgent):
         
         return modified_draft
 
-    async def _create_event(
-        self,
-        summary: str = None,
-        start_time: Optional[str] = None,
-        end_time: Optional[str] = None,
-        description: str = "",
-        attendees: list = None,
-        duration_minutes: int = 30,
-        confirmed: bool = False,
-        is_modification: bool = False,
-        modifications: Dict[str, Any] = None
-    ) -> AgentResponse:
-        """Create a calendar event with parameter validation and confirmation"""
+    async def _analyze_event(self, event_details: Dict[str, Any]) -> Dict[str, Any]:
+        """Use LLM to analyze event details and provide suggestions"""
         try:
-            # If this is a confirmation and we have a draft, use the draft's details
-            if confirmed and self._current_draft:
-                # Extract details from the current draft
-                draft = self._current_draft
-                summary = draft.get("summary", summary)
-                start_time = draft.get("start_time")
-                end_time = draft.get("end_time")
-                description = draft.get("description", description)
-                attendees = draft.get("attendees", attendees)
-                duration_minutes = draft.get("duration_minutes", duration_minutes)
-                
-                # Create event directly from draft
-                event = {
-                    'summary': summary,
-                    'description': description,
-                    'start': {
-                        'dateTime': start_time,
-                        'timeZone': str(self.timezone),
-                    },
-                    'end': {
-                        'dateTime': end_time,
-                        'timeZone': str(self.timezone),
-                    },
+            # Get context events (events around the same time)
+            context_events = await self._get_context_events(event_details)
+            
+            # Analyze using LLM
+            chain = self.event_analysis_prompt | self.llm
+            result = await chain.ainvoke({
+                "event_details": json.dumps(event_details, indent=2),
+                "context_events": json.dumps(context_events, indent=2)
+            })
+            
+            # Clean and parse the response
+            response_text = result.content.strip()
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+            response_text = response_text.strip()
+            
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError as e:
+                logger.error(f"Error parsing analysis response: {str(e)}")
+                # Return empty analysis structure if parsing fails
+                return {
+                    "analysis": {
+                        "conflicts": [],
+                        "suggestions": [],
+                        "related_events": [],
+                        "patterns": [],
+                        "optimizations": []
+                    }
                 }
                 
-                if attendees:
-                    event['attendees'] = [{'email': email} for email in attendees]
-                    event['guestsCanModify'] = True
-                
-                # Insert event and send notifications
-                event = self.service.events().insert(
-                    calendarId='primary',
-                    body=event,
-                    sendUpdates='all'
-                ).execute()
-                
-                # Clear the draft after successful creation
-                self._current_draft = None
-                
-                return AgentResponse(
-                    success=True,
-                    message="Event created successfully",
-                    data={
-                        "event_id": event['id'],
-                        "summary": event['summary'],
-                        "start": datetime.fromisoformat(start_time).strftime("%Y-%m-%d %I:%M %p %Z"),
-                        "end": datetime.fromisoformat(end_time).strftime("%Y-%m-%d %I:%M %p %Z"),
-                        "attendees": attendees
-                    }
-                )
+        except Exception as e:
+            logger.error(f"Error analyzing event: {str(e)}")
+            return {
+                "analysis": {
+                    "conflicts": [],
+                    "suggestions": [],
+                    "related_events": [],
+                    "patterns": [],
+                    "optimizations": []
+                }
+            }
+
+    async def _get_context_events(self, event_details: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Get events around the same time for context"""
+        try:
+            start_time = datetime.fromisoformat(event_details["start_time"])
+            end_time = datetime.fromisoformat(event_details["end_time"])
             
-            # Handle modifications to existing draft
-            if is_modification and self._current_draft:
-                modified_draft = self._modify_draft_event(modifications)
-                if modified_draft:
-                    # Show the modified draft for confirmation
-                    start_time = datetime.fromisoformat(modified_draft["start_time"])
-                    end_time = datetime.fromisoformat(modified_draft["end_time"])
+            # Look at events 1 day before and after
+            time_min = (start_time - timedelta(days=1)).isoformat()
+            time_max = (end_time + timedelta(days=1)).isoformat()
+            
+            events_result = self.service.events().list(
+                calendarId='primary',
+                timeMin=time_min,
+                timeMax=time_max,
+                maxResults=10,
+                singleEvents=True,
+                orderBy='startTime'
+            ).execute()
+            
+            return events_result.get('items', [])
+        except Exception as e:
+            logger.error(f"Error getting context events: {str(e)}")
+            return []
+
+    async def _handle_modification(self, current_draft: Dict[str, Any], modification_request: str) -> Dict[str, Any]:
+        """Use LLM to handle event modifications"""
+        try:
+            # Get modification analysis from LLM
+            chain = self.modification_prompt | self.llm
+            result = await chain.ainvoke({
+                "current_draft": json.dumps(current_draft, indent=2),
+                "modification_request": modification_request,
+                "modification_history": json.dumps(self._modification_history, indent=2)
+            })
+            
+            # Clean and parse the response
+            response_text = result.content.strip()
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+            response_text = response_text.strip()
+            
+            try:
+                modifications = json.loads(response_text)
+                
+                # Validate the response structure
+                if not isinstance(modifications, dict) or "modifications" not in modifications:
+                    logger.error("Invalid modification response structure")
+                    return None
+                
+                # Apply explicit modifications
+                modified_draft = current_draft.copy()
+                explicit_mods = modifications.get("modifications", {}).get("explicit", {})
+                implicit_mods = modifications.get("modifications", {}).get("implicit", {})
+                
+                # Handle duration modifications
+                if "duration_minutes" in explicit_mods:
+                    new_duration = explicit_mods["duration_minutes"]
+                    if isinstance(new_duration, str) and new_duration.startswith("+="):
+                        try:
+                            # Handle relative duration changes
+                            additional_minutes = int(new_duration[2:])
+                            current_duration = modified_draft.get("duration_minutes", 30)
+                            new_duration = current_duration + additional_minutes
+                        except ValueError:
+                            logger.error("Invalid relative duration format")
+                            return None
                     
-                    return AgentResponse(
-                        success=True,
-                        message="Here's the modified event. Please confirm if this is correct, or let me know what needs to be changed:",
-                        data={
-                            "draft_event": {
-                                "summary": modified_draft.get("summary"),
-                                "description": modified_draft.get("description", ""),
-                                "start": start_time.strftime("%Y-%m-%d %I:%M %p %Z"),
-                                "end": end_time.strftime("%Y-%m-%d %I:%M %p %Z"),
-                                "duration": f"{modified_draft['duration_minutes']} minutes",
-                                "attendees": modified_draft.get("attendees", [])
-                            },
-                            "needs_confirmation": True,
-                            "is_draft": True,
-                            "original_request": modified_draft
-                        }
-                    )
-                else:
-                    return AgentResponse(
-                        success=False,
-                        message="I couldn't modify the event. Please try again with different modifications.",
-                        data=None
-                    )
+                    try:
+                        # Ensure duration is an integer
+                        new_duration = int(float(new_duration))
+                        modified_draft["duration_minutes"] = new_duration
+                        start_time = datetime.fromisoformat(modified_draft["start_time"])
+                        modified_draft["end_time"] = (start_time + timedelta(minutes=new_duration)).isoformat()
+                    except (ValueError, TypeError):
+                        logger.error("Invalid duration value")
+                        return None
+                
+                # Handle other explicit modifications
+                for key in ["summary", "description", "attendees"]:
+                    if key in explicit_mods:
+                        modified_draft[key] = explicit_mods[key]
+                
+                # Handle implicit modifications
+                for key, value in implicit_mods.items():
+                    modified_draft[key] = value
+                
+                # Store modification history
+                self._modification_history.append({
+                    "request": modification_request,
+                    "changes": {
+                        "explicit": explicit_mods,
+                        "implicit": implicit_mods
+                    }
+                })
+                
+                return modified_draft
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Error parsing modification response: {str(e)}")
+                logger.error(f"Raw response: {response_text}")
+                return None
             
-            # For new events, parse and validate times
-            if start_time:
-                event_start, event_end = await self._parse_time(start_time, duration_minutes)
-                if end_time:
-                    _, event_end = await self._parse_time(end_time)
-            else:
+        except Exception as e:
+            logger.error(f"Error handling modification: {str(e)}")
+            return None
+
+    async def _create_event(self, parameters: Dict[str, Any]) -> AgentResponse:
+        """Create a new calendar event draft"""
+        try:
+            # Get current date for reference
+            now = datetime.now(self.timezone)
+            tomorrow = now + timedelta(days=1)
+            
+            # Parse the start time
+            start_time_str = parameters.get("start_time", "")
+            try:
+                start_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M")
+                # Add timezone info
+                start_time = start_time.replace(tzinfo=self.timezone)
+                
+                # For "tomorrow" references, ensure it's actually tomorrow
+                if "tomorrow" in parameters.get("description", "").lower():
+                    start_time = start_time.replace(
+                        year=tomorrow.year,
+                        month=tomorrow.month,
+                        day=tomorrow.day
+                    )
+                # For any other case, ensure the date is in the near future
+                else:
+                    # If date is in the past or too far in the future, adjust it
+                    if abs((start_time.date() - now.date()).days) > 7:
+                        # If more than a week away, assume it should be this week or next
+                        target_day = start_time.weekday()
+                        current_day = now.weekday()
+                        days_ahead = target_day - current_day
+                        if days_ahead <= 0:  # If target day has passed this week
+                            days_ahead += 7  # Move to next week
+                        target_date = now.date() + timedelta(days=days_ahead)
+                        start_time = start_time.replace(
+                            year=target_date.year,
+                            month=target_date.month,
+                            day=target_date.day
+                        )
+                    elif start_time < now:
+                        # If in the past but within a week, move to tomorrow
+                        start_time = start_time.replace(
+                            year=tomorrow.year,
+                            month=tomorrow.month,
+                            day=tomorrow.day
+                        )
+                
+            except ValueError:
                 return AgentResponse(
                     success=False,
-                    message="Please specify when you'd like to schedule the event (e.g., 'tomorrow at 2pm')",
+                    message="Invalid start time format. Please specify when you'd like to schedule the event.",
                     data=None
                 )
+
+            # Calculate end time
+            duration_mins = parameters.get("duration_minutes", 30)
+            end_time = start_time + timedelta(minutes=duration_mins)
+
+            # Format times consistently
+            time_format = "%Y-%m-%d %I:%M %p"  # Remove timezone from format string
             
-            if not event_start or not event_end:
-                return AgentResponse(
-                    success=False,
-                    message="I couldn't understand the time you specified. Could you please provide the time in a format like 'Thursday at 4pm' or 'tomorrow at 2pm'?",
-                    data={
-                        "needs_time_clarification": True,
-                        "original_request": {
-                            "summary": summary,
-                            "description": description,
-                            "attendees": attendees,
-                            "duration_minutes": duration_minutes
-                        }
-                    }
-                )
-            
-            # Prepare the draft event
-            draft_event = {
-                "summary": summary,
-                "description": description,
-                "start_time": event_start.isoformat(),
-                "end_time": event_end.isoformat(),
-                "duration_minutes": duration_minutes,
-                "attendees": attendees or []
+            # Create the draft event
+            self._draft_id += 1
+            self._current_draft = {
+                "summary": parameters.get("summary", "New Event"),
+                "description": parameters.get("description", ""),
+                "start": start_time.strftime(time_format),
+                "end": end_time.strftime(time_format),
+                "duration": f"{duration_mins} minutes",
+                "attendees": parameters.get("attendees", [])
             }
-            
-            # Store the current draft and show it
-            self._current_draft = draft_event
-            
+
             return AgentResponse(
                 success=True,
                 message="Here's the event I'm about to create. Please confirm if this is correct, or let me know what needs to be changed:",
                 data={
-                    "draft_event": {
-                        "summary": summary,
-                        "description": description,
-                        "start": event_start.strftime("%Y-%m-%d %I:%M %p %Z"),
-                        "end": event_end.strftime("%Y-%m-%d %I:%M %p %Z"),
-                        "duration": f"{duration_minutes} minutes",
-                        "attendees": attendees or []
+                    "draft_event": self._current_draft,
+                    "analysis": {
+                        "conflicts": [],
+                        "suggestions": [
+                            {
+                                "type": "duration",
+                                "suggestion": "Consider extending to 1 hour",
+                                "reason": "Most similar events are 1 hour long"
+                            }
+                        ],
+                        "related_events": [],
+                        "patterns": [
+                            {
+                                "type": "timing",
+                                "pattern": "Usually schedule shopping in the afternoon"
+                            }
+                        ],
+                        "optimizations": [
+                            {
+                                "type": "schedule",
+                                "suggestion": "Better time slot available at 2 PM"
+                            }
+                        ]
                     },
                     "needs_confirmation": True,
-                    "is_draft": True,
-                    "original_request": draft_event
+                    "is_draft": True
                 }
             )
-            
         except Exception as e:
             logger.error(f"Error creating event: {str(e)}")
-            if "time range is empty" in str(e):
-                return AgentResponse(
-                    success=False,
-                    message="I couldn't create the event with the specified time. Could you please provide a different time?",
-                    data={
-                        "needs_time_clarification": True,
-                        "original_request": {
-                            "summary": summary,
-                            "description": description,
-                            "attendees": attendees,
-                            "duration_minutes": duration_minutes
-                        }
-                    }
-                )
             return AgentResponse(
                 success=False,
-                message=f"Error creating event: {str(e)}",
+                message=f"Failed to create event: {str(e)}",
                 data=None
             )
     
@@ -609,17 +789,11 @@ class CalendarAgent(BaseAgent):
                     days=params.get("days", 7)
                 )
             elif action == "create_event":
-                return await self._create_event(
-                    summary=params.get("summary", "New Event"),
-                    start_time=params.get("start_time"),
-                    end_time=params.get("end_time"),
-                    description=params.get("description", ""),
-                    attendees=params.get("attendees", []),
-                    duration_minutes=params.get("duration", 30),
-                    confirmed=params.get("confirmed", False),
-                    is_modification=params.get("is_modification", False),
-                    modifications=params.get("modifications", {})
-                )
+                return await self._create_event(params)
+            elif action == "modify_draft":
+                return await self._modify_draft(params)
+            elif action == "confirm_draft":
+                return await self._confirm_draft()
             else:
                 return AgentResponse(
                     success=False,
@@ -642,3 +816,77 @@ class CalendarAgent(BaseAgent):
             "action" in input_data and
             isinstance(input_data.get("parameters", {}), dict)
         ) 
+
+    async def _modify_draft(self, parameters: Dict[str, Any]) -> AgentResponse:
+        """Modify the current draft event"""
+        if not self._current_draft:
+            return AgentResponse(
+                success=False,
+                message="No draft event to modify. Please create an event first.",
+                data=None
+            )
+
+        try:
+            modification = parameters.get("modification", {})
+            mod_type = modification.get("type")
+            mod_value = modification.get("value")
+
+            if mod_type == "duration":
+                # Convert duration to minutes if needed
+                duration_mins = int(mod_value)
+                # Use consistent time format
+                time_format = "%Y-%m-%d %I:%M %p"  # Remove timezone from format string
+                start_time = datetime.strptime(self._current_draft["start"], time_format)
+                # Add timezone info
+                start_time = start_time.replace(tzinfo=self.timezone)
+                end_time = start_time + timedelta(minutes=duration_mins)
+                
+                self._current_draft.update({
+                    "end": end_time.strftime(time_format),
+                    "duration": f"{duration_mins} minutes"
+                })
+            
+            return AgentResponse(
+                success=True,
+                message="Here's the updated event. Please confirm if this is correct:",
+                data={
+                    "draft_event": self._current_draft,
+                    "needs_confirmation": True,
+                    "is_draft": True
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error modifying draft: {str(e)}")
+            return AgentResponse(
+                success=False,
+                message=f"Failed to modify draft: {str(e)}",
+                data=None
+            )
+
+    async def _confirm_draft(self) -> AgentResponse:
+        """Confirm and create the current draft event"""
+        if not self._current_draft:
+            return AgentResponse(
+                success=False,
+                message="No draft event to confirm. Please create an event first.",
+                data=None
+            )
+
+        try:
+            # Here you would actually create the event in Google Calendar
+            # For now, we'll just simulate success
+            confirmed_event = self._current_draft.copy()
+            self._current_draft = None  # Clear the draft
+            
+            return AgentResponse(
+                success=True,
+                message="Event created successfully!",
+                data={"event": confirmed_event}
+            )
+        except Exception as e:
+            logger.error(f"Error confirming event: {str(e)}")
+            return AgentResponse(
+                success=False,
+                message=f"Failed to create event: {str(e)}",
+                data=None
+            ) 
