@@ -67,3 +67,20 @@ graph TD
     E --> F
     F --> A
 ```
+##
+```mermaid
+sequenceDiagram
+    participant Main
+    participant Manager
+    participant IntentDetector
+    participant EmailAgent
+    participant CalendarAgent
+    
+    Main->>Manager: Create Manager
+    Main->>IntentDetector: Create IntentDetector
+    Main->>Manager: Register IntentDetector
+    Main->>EmailAgent: Create EmailAgent
+    Main->>Manager: Register EmailAgent
+    Main->>CalendarAgent: Create CalendarAgent
+    Main->>Manager: Register CalendarAgent
+```
